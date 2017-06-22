@@ -1554,7 +1554,8 @@ STDMETHODIMP HackerDXGISwapChain::ResizeBuffers(THIS_
 	HRESULT hr = mOrigSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
 
 	if (SUCCEEDED(hr)) {
-		mOverlay->Resize(Width, Height);
+		if (mOverlay)
+			mOverlay->Resize(Width, Height);
 
 		if (G->mResolutionInfo.from == GetResolutionFrom::SWAP_CHAIN) {
 			G->mResolutionInfo.width = Width;

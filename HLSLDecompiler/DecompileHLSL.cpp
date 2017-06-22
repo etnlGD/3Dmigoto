@@ -667,13 +667,26 @@ public:
 		// Read list.
 		while (pos < size)
 		{
-			char name[256], type[16], format[16], dim[16];
-			int slot, arraySize;
+			char name[256], type[16], format[16], dim[16], bind[16];
+			int arraySize;
 			type[0] = 0;
-			int numRead = sscanf_s(c + pos, "// %s %s %s %s %d %d",
-				name, (int)sizeof(name), type, (int)sizeof(type), format, (int)sizeof(format), dim, (int)sizeof(dim), &slot, &arraySize);
+			int numRead = sscanf_s(c + pos, "// %s %s %s %s %s %d",
+				name, (int)sizeof(name), type, (int)sizeof(type), format, (int)sizeof(format), dim, (int)sizeof(dim), 
+				bind, (int)sizeof(bind), &arraySize);
+
 			if (numRead != 6)
 				logDecompileError("Error parsing resource declaration: " + string(c + pos, 80));
+
+			int slot = 0;
+			for (int i = 0; i < sizeof(bind) && bind[i]; ++i)
+			{
+				if (bind[i] >= '0' && bind[i] <= '9')
+				{
+					slot = atoi(&bind[i]);
+					break;
+				}
+			}
+
 			if (!strcmp(type, "sampler"))
 			{
 				char *escapePos = strchr(name, '['); if (escapePos) *escapePos = '_';
@@ -4864,7 +4877,7 @@ public:
 					}
 
 						// New variant found in Mordor.  Example:
-						//   gInstanceBuffer                   texture  struct         r/o    0        1
+						//   gInstanceBuffer                   texture?struct         r/o  ?0      ?1
 						//   dcl_resource_structured t0, 16 
 						//   ld_structured_indexable(structured_buffer, stride=16)(mixed,mixed,mixed,mixed) r1.xyzw, r0.x, l(0), t0.xyzw
 						// becomes:

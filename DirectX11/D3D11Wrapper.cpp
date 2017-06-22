@@ -830,6 +830,13 @@ HRESULT WINAPI D3D11CreateDeviceAndSwapChain(
 
 	// Optional parameters means these might be null.
 	ID3D11Device *origDevice = ppDevice ? *ppDevice : nullptr;
+	ID3D11DeviceContext* fakeDeviceContext = nullptr;
+	if (origDevice && ppImmediateContext == nullptr)
+	{
+		ppImmediateContext = &fakeDeviceContext;
+		origDevice->GetImmediateContext(ppImmediateContext);
+	}
+
 	ID3D11DeviceContext *origContext = ppImmediateContext ? *ppImmediateContext : nullptr;
 	IDXGISwapChain *origSwapChain = ppSwapChain ? *ppSwapChain : nullptr;
 
@@ -887,6 +894,9 @@ HRESULT WINAPI D3D11CreateDeviceAndSwapChain(
 		"context wrapper = %p, swapchain handle = %p, swapchain wrapper = %p \n\n", 
 		ret, origDevice, deviceWrap, origContext, contextWrap, origSwapChain, swapchainWrap);
 	
+	if (ppImmediateContext == &fakeDeviceContext && fakeDeviceContext != nullptr)
+		fakeDeviceContext->Release();
+
 	return ret;
 }
 

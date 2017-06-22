@@ -12,7 +12,4 @@
     <ClInclude Include="..\nvstereo.h" />
     <ClInclude Include="..\version.h" />
   </ItemGroup>
-  <ItemGroup>
-    <ResourceCompile Include="NVAPI.rc" />
-  </ItemGroup>
 </Project>
