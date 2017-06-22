@@ -6,6 +6,14 @@
 #include <DirectXMath.h>
 #include <util.h>
 #include "DrawCallInfo.h"
+#include <nvapi.h>
+
+// Used to prevent typos leading to infinite recursion (or at least overflowing
+// the real stack) due to a section running itself or a circular reference. 64
+// should be more than generous - I don't want it to be too low and stifle
+// people's imagination, but I'd be very surprised if anyone ever has a
+// legitimate need to exceed this:
+#define MAX_COMMAND_LIST_RECURSION 64
 
 // Forward declarations instead of #includes to resolve circular includes (we
 // include Hacker*.h, which includes Globals.h, which includes us):
@@ -20,6 +28,7 @@ struct CommandListState {
 	DrawCallInfo *call_info;
 	bool post;
 	CURSORINFO cursor_info;
+	int recursion;
 
 	// Anything that needs to be updated at the end of the command list:
 	bool update_params;
@@ -30,7 +39,8 @@ struct CommandListState {
 		call_info(NULL),
 		post(false),
 		update_params(false),
-		cursor_info()
+		cursor_info(),
+		recursion(0)
 	{}
 };
 
@@ -55,6 +65,28 @@ public:
 	CheckTextureOverrideCommand() :
 		shader_type(NULL),
 		texture_slot(INT_MAX)
+	{}
+
+	void run(HackerDevice*, HackerContext*, ID3D11Device*, ID3D11DeviceContext*, CommandListState*) override;
+};
+
+class ExplicitCommandListSection
+{
+public:
+	CommandList command_list;
+	CommandList post_command_list;
+};
+
+typedef std::unordered_map<std::wstring, class ExplicitCommandListSection> ExplicitCommandListSections;
+extern ExplicitCommandListSections explicitCommandListSections;
+
+class RunExplicitCommandList : public CommandListCommand {
+public:
+	wstring ini_val;
+	ExplicitCommandListSection *command_list_section;
+
+	RunExplicitCommandList() :
+		command_list_section(NULL)
 	{}
 
 	void run(HackerDevice*, HackerContext*, ID3D11Device*, ID3D11DeviceContext*, CommandListState*) override;
@@ -98,7 +130,7 @@ public:
 	CustomShader();
 	~CustomShader();
 
-	bool compile(char type, wchar_t *filename, wstring *wname);
+	bool compile(char type, wchar_t *filename, const wstring *wname);
 	void substantiate(ID3D11Device *mOrigDevice);
 };
 
@@ -250,6 +282,54 @@ static EnumName_t<const wchar_t *, CustomResourceType> CustomResourceTypeNames[]
 
 	{NULL, CustomResourceType::INVALID} // End of list marker
 };
+enum class CustomResourceMode {
+	DEFAULT,
+	AUTO,
+	STEREO,
+	MONO,
+};
+static EnumName_t<const wchar_t *, CustomResourceMode> CustomResourceModeNames[] = {
+	{L"auto", CustomResourceMode::AUTO},
+	{L"stereo", CustomResourceMode::STEREO},
+	{L"mono", CustomResourceMode::MONO},
+	{NULL, CustomResourceMode::DEFAULT} // End of list marker
+};
+
+// The bind flags are usually set automatically, but there are cases where
+// these can be used to influence driver heuristics (e.g. a buffer that
+// includes a render target or UAV bind flag may be stereoised), so we allow
+// them to be set manually as well. If specified these will *replace* the bind
+// flags 3DMigoto sets automatically - if you use these, you presumably know
+// what you are doing. This enumeration is essentially the same as
+// D3D11_BIND_FLAG, but this allows us to use parse_enum_option_string.
+enum class CustomResourceBindFlags {
+	INVALID         = 0x00000000,
+	VERTEX_BUFFER   = 0x00000001,
+	INDEX_BUFFER    = 0x00000002,
+	CONSTANT_BUFFER = 0x00000004,
+	SHADER_RESOURCE = 0x00000008,
+	STREAM_OUTPUT   = 0x00000010,
+	RENDER_TARGET   = 0x00000020,
+	DEPTH_STENCIL   = 0x00000040,
+	UNORDERED_ACCESS= 0x00000080,
+	DECODER         = 0x00000200,
+	VIDEO_ENCODER   = 0x00000400,
+};
+SENSIBLE_ENUM(CustomResourceBindFlags);
+static EnumName_t<wchar_t *, CustomResourceBindFlags> CustomResourceBindFlagNames[] = {
+	{L"vertex_buffer", CustomResourceBindFlags::VERTEX_BUFFER},
+	{L"index_buffer", CustomResourceBindFlags::INDEX_BUFFER},
+	{L"constant_buffer", CustomResourceBindFlags::CONSTANT_BUFFER},
+	{L"shader_resource", CustomResourceBindFlags::SHADER_RESOURCE},
+	{L"stream_output", CustomResourceBindFlags::STREAM_OUTPUT},
+	{L"render_target", CustomResourceBindFlags::RENDER_TARGET},
+	{L"depth_stencil", CustomResourceBindFlags::DEPTH_STENCIL},
+	{L"unordered_access", CustomResourceBindFlags::UNORDERED_ACCESS},
+	{L"decoder", CustomResourceBindFlags::DECODER},
+	{L"video_encoder", CustomResourceBindFlags::VIDEO_ENCODER},
+	{NULL, CustomResourceBindFlags::INVALID} // End of list marker
+};
+
 class CustomResource
 {
 public:
@@ -274,6 +354,8 @@ public:
 	// Used to override description when copying or synthesise resources
 	// from scratch:
 	CustomResourceType override_type;
+	CustomResourceMode override_mode;
+	CustomResourceBindFlags override_bind_flags;
 	DXGI_FORMAT override_format;
 	int override_width;
 	int override_height;
@@ -291,7 +373,8 @@ public:
 	CustomResource();
 	~CustomResource();
 
-	void Substantiate(ID3D11Device *mOrigDevice);
+	void Substantiate(ID3D11Device *mOrigDevice, StereoHandle mStereoHandle);
+	bool OverrideSurfaceCreationMode(StereoHandle mStereoHandle, NVAPI_STEREO_SURFACECREATEMODE *orig_mode);
 	void OverrideBufferDesc(D3D11_BUFFER_DESC *desc);
 	void OverrideTexDesc(D3D11_TEXTURE1D_DESC *desc);
 	void OverrideTexDesc(D3D11_TEXTURE2D_DESC *desc);
@@ -300,7 +383,8 @@ public:
 
 private:
 	void LoadFromFile(ID3D11Device *mOrigDevice);
-	void SubstantiateBuffer(ID3D11Device *mOrigDevice);
+	void LoadBufferFromFile(ID3D11Device *mOrigDevice);
+	void SubstantiateBuffer(ID3D11Device *mOrigDevice, void **buf, DWORD size);
 	void SubstantiateTexture1D(ID3D11Device *mOrigDevice);
 	void SubstantiateTexture2D(ID3D11Device *mOrigDevice);
 	void SubstantiateTexture3D(ID3D11Device *mOrigDevice);

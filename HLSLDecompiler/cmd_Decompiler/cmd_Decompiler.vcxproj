@@ -155,8 +155,9 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
     </Link>
     <PostBuildEvent>
-      <Command>
-      </Command>
+      <Command>xcopy "$(WindowsSdkDir_80)redist\d3d\x86\d3dcompiler_46.dll" "$(TargetDir)" /E /Y
+
+</Command>
     </PostBuildEvent>
     <PostBuildEvent>
       <Message>Copy D3Dcompiler_46.dll</Message>
@@ -178,7 +179,7 @@
       <AdditionalDependencies>d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy “$(WindowsSdkDir_80)redist\d3d\x64\d3dcompiler_46.dll” “$(TargetDir)” /E /Y
+      <Command>xcopy "$(WindowsSdkDir_80)redist\d3d\x64\d3dcompiler_46.dll" "$(TargetDir)" /E /Y
 
 </Command>
     </PostBuildEvent>
@@ -206,7 +207,7 @@
       <AdditionalDependencies>d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy “$(WindowsSdkDir_80)redist\d3d\x86\d3dcompiler_46.dll” “$(TargetDir)” /E /Y
+      <Command>xcopy "$(WindowsSdkDir_80)redist\d3d\x86\d3dcompiler_46.dll" "$(TargetDir)" /E /Y
 
 </Command>
     </PostBuildEvent>
@@ -236,7 +237,7 @@
       <AdditionalDependencies>d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy “$(WindowsSdkDir_80)redist\d3d\x64\d3dcompiler_46.dll” “$(TargetDir)” /E /Y
+      <Command>xcopy "$(WindowsSdkDir_80)redist\d3d\x64\d3dcompiler_46.dll" "$(TargetDir)" /E /Y
 
 </Command>
     </PostBuildEvent>
@@ -264,7 +265,7 @@
       <AdditionalDependencies>d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy “$(WindowsSdkDir_80)redist\d3d\x86\d3dcompiler_46.dll” “$(TargetDir)” /E /Y
+      <Command>xcopy "$(WindowsSdkDir_80)redist\d3d\x86\d3dcompiler_46.dll" "$(TargetDir)" /E /Y
 
 </Command>
     </PostBuildEvent>
@@ -292,7 +293,7 @@
       <AdditionalDependencies>d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy “$(WindowsSdkDir_80)redist\d3d\x64\d3dcompiler_46.dll” “$(TargetDir)” /E /Y
+      <Command>xcopy "$(WindowsSdkDir_80)redist\d3d\x64\d3dcompiler_46.dll" "$(TargetDir)" /E /Y
 
 </Command>
     </PostBuildEvent>

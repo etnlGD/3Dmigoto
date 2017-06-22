@@ -8,6 +8,7 @@
 #include "Globals.h"
 #include "Override.h"
 #include "Hunting.h"
+#include "nvprofile.h"
 
 // List all the section prefixes which may contain a command list here and
 // whether they are a prefix or an exact match. Listing a section here will not
@@ -21,31 +22,79 @@
 //
 // ParseCommandList will terminate the program if it is called on a section not
 // listed here to make sure we never forget to update this.
-struct CommandListSection {
+struct Section {
 	wchar_t *section;
 	bool prefix;
 };
-static CommandListSection CommandListSections[] = {
+static Section CommandListSections[] = {
 	{L"ShaderOverride", true},
 	{L"TextureOverride", true},
 	{L"CustomShader", true},
+	{L"CommandList", true},
 	{L"Present", false},
 };
 
-bool IsCommandListSection(const wchar_t *section)
+// List all remaining sections so we can verify that every section listed in
+// the d3dx.ini is valid and warn about any typos. As above, the boolean value
+// indicates that this is a prefix, false if it is an exact match. No need to
+// list a section in both lists - put it above if it is a command list section,
+// and in this list if it is not:
+static Section RegularSections[] = {
+	{L"Logging", false},
+	{L"System", false},
+	{L"Device", false},
+	{L"Stereo", false},
+	{L"Rendering", false},
+	{L"Hunting", false},
+	{L"Constants", false},
+	{L"Profile", false},
+	{L"ConvergenceMap", false}, // Only used in nvapi wrapper
+	{L"Resource", true},
+	{L"Key", true},
+};
+
+// List of sections that will not trigger a warning if they contain a line
+// without an equals sign
+static wchar_t *AllowLinesWithoutEquals[] = {
+	L"Profile",
+};
+
+static bool SectionInList(const wchar_t *section, Section section_list[], int list_size)
 {
 	size_t len;
 	int i;
 
-	for (i = 0; i < ARRAYSIZE(CommandListSections); i++) {
-		if (CommandListSections[i].prefix) {
-			len = wcslen(CommandListSections[i].section);
-			if (!_wcsnicmp(section, CommandListSections[i].section, len))
+	for (i = 0; i < list_size; i++) {
+		if (section_list[i].prefix) {
+			len = wcslen(section_list[i].section);
+			if (!_wcsnicmp(section, section_list[i].section, len))
 				return true;
 		} else {
-			if (!_wcsicmp(section, CommandListSections[i].section))
+			if (!_wcsicmp(section, section_list[i].section))
 				return true;
 		}
+	}
+
+	return false;
+}
+
+static bool IsCommandListSection(const wchar_t *section)
+{
+	return SectionInList(section, CommandListSections, ARRAYSIZE(CommandListSections));
+}
+
+static bool IsRegularSection(const wchar_t *section)
+{
+	return SectionInList(section, RegularSections, ARRAYSIZE(RegularSections));
+}
+
+static bool DoesSectionAllowLinesWithoutEquals(const wchar_t *section)
+{
+	int i;
+
+	for (i = 0; i < ARRAYSIZE(AllowLinesWithoutEquals); i++) {
+		if (!_wcsicmp(section, AllowLinesWithoutEquals[i]))
+			return true;
 	}
 
 	return false;
@@ -225,6 +274,7 @@ static void GetIniSection(IniSection &key_vals, const wchar_t *section, wchar_t 
 	DWORD result;
 	IniSections keys;
 	bool warn_duplicates = true;
+	bool warn_lines_without_equals = true;
 
 	// Sections that utilise a command list are allowed to have duplicate
 	// keys, while other sections are not. The command list parser will
@@ -232,6 +282,13 @@ static void GetIniSection(IniSection &key_vals, const wchar_t *section, wchar_t 
 	// list.
 	if (IsCommandListSection(section))
 		warn_duplicates = false;
+	else if (!IsRegularSection(section)) {
+		LogInfoW(L"WARNING: Unknown section in d3dx.ini: [%s]\n", section);
+		BeepFailure2();
+	}
+
+	if (DoesSectionAllowLinesWithoutEquals(section))
+		warn_lines_without_equals = false;
 
 	key_vals.clear();
 
@@ -251,14 +308,16 @@ static void GetIniSection(IniSection &key_vals, const wchar_t *section, wchar_t 
 	for (kptr = buf; *kptr; kptr++) {
 		for (vptr = kptr; *vptr && *vptr != L'='; vptr++) {}
 		if (*vptr != L'=') {
-			LogInfoW(L"WARNING: Malformed line in d3dx.ini: [%s] \"%s\"\n", section, kptr);
-			BeepFailure2();
-			kptr = vptr;
-			continue;
+			if (warn_lines_without_equals) {
+				LogInfoW(L"WARNING: Malformed line in d3dx.ini: [%s] \"%s\"\n", section, kptr);
+				BeepFailure2();
+				kptr = vptr;
+				continue;
+			}
+		} else {
+			*vptr = L'\0';
+			vptr++;
 		}
-
-		*vptr = L'\0';
-		vptr++;
 
 		if (warn_duplicates) {
 			if (keys.count(kptr)) {
@@ -336,6 +395,7 @@ static void RegisterPresetKeyBindings(IniSections &sections, LPCWSTR iniFile)
 
 		if (!GetPrivateProfileString(id, L"Key", 0, key, MAX_PATH, iniFile)) {
 			LogInfo("  WARNING: [%S] missing Key=\n", id);
+			BeepFailure2();
 			continue;
 		}
 
@@ -416,6 +476,17 @@ static void ParseResourceSections(IniSections &sections, LPCWSTR iniFile)
 			}
 		}
 
+		if (GetPrivateProfileString(i->c_str(), L"mode", 0, setting, MAX_PATH, iniFile)) {
+			custom_resource->override_mode = lookup_enum_val<const wchar_t *, CustomResourceMode>
+				(CustomResourceModeNames, setting, CustomResourceMode::DEFAULT);
+			if (custom_resource->override_mode == CustomResourceMode::DEFAULT) {
+				LogInfo("  WARNING: Unknown mode \"%S\"\n", setting);
+				BeepFailure2();
+			} else {
+				LogInfo("  mode=%S\n", setting);
+			}
+		}
+
 		if (GetPrivateProfileString(i->c_str(), L"format", 0, setting, MAX_PATH, iniFile)) {
 			custom_resource->override_format = ParseFormatString(setting);
 			if (custom_resource->override_format == (DXGI_FORMAT)-1) {
@@ -439,7 +510,12 @@ static void ParseResourceSections(IniSections &sections, LPCWSTR iniFile)
 		custom_resource->width_multiply = GetIniFloat(i->c_str(), L"width_multiply", 1.0f, iniFile, NULL);
 		custom_resource->height_multiply = GetIniFloat(i->c_str(), L"height_multiply", 1.0f, iniFile, NULL);
 
-		// TODO: Overrides for bind flags, misc flags, etc
+		if (GetPrivateProfileString(i->c_str(), L"bind_flags", 0, setting, MAX_PATH, iniFile)) {
+			custom_resource->override_bind_flags = parse_enum_option_string<wchar_t *, CustomResourceBindFlags>
+				(CustomResourceBindFlagNames, setting, NULL);
+		}
+
+		// TODO: Overrides for misc flags, etc
 	}
 }
 
@@ -529,6 +605,25 @@ log_continue:
 	}
 }
 
+static void ParseDriverProfile(wchar_t *iniFile)
+{
+	IniSection section;
+	IniSection::iterator entry;
+	wstring *lhs, *rhs;
+
+	// Arguably we should only parse this section the first time since the
+	// settings will only be applied on startup.
+	profile_settings.clear();
+
+	GetIniSection(section, L"Profile", iniFile);
+	for (entry = section.begin(); entry < section.end(); entry++) {
+		lhs = &entry->first;
+		rhs = &entry->second;
+
+		parse_ini_profile_line(lhs, rhs);
+	}
+}
+
 // List of keys in [ShaderOverride] sections that are processed in this
 // function. Used by ParseCommandList to find any unrecognised lines.
 wchar_t *ShaderOverrideIniKeys[] = {
@@ -567,6 +662,7 @@ static void ParseShaderOverrideSections(IniSections &sections, wchar_t *iniFile)
 
 		if (!GetPrivateProfileString(id, L"Hash", 0, setting, MAX_PATH, iniFile)) {
 			LogInfo("  WARNING: [%S] missing Hash=\n", id);
+			BeepFailure2();
 			continue;
 		}
 		swscanf_s(setting, L"%16llx", &hash);
@@ -691,6 +787,7 @@ static void ParseTextureOverrideSections(IniSections &sections, wchar_t *iniFile
 
 		if (!GetPrivateProfileString(id, L"Hash", 0, setting, MAX_PATH, iniFile)) {
 			LogInfo("  WARNING: [%S] missing Hash=\n", id);
+			BeepFailure2();
 			continue;
 		}
 
@@ -768,6 +865,8 @@ static wchar_t *BlendFactors[] = {
 	L"DEST_COLOR",
 	L"INV_DEST_COLOR",
 	L"SRC_ALPHA_SAT",
+	L"",
+	L"",
 	L"BLEND_FACTOR",
 	L"INV_BLEND_FACTOR",
 	L"SRC1_COLOR",
@@ -1100,63 +1199,112 @@ wchar_t *CustomShaderIniKeys[] = {
 	L"topology",
 	NULL
 };
-static void ParseCustomShaderSections(IniSections &sections, wchar_t *iniFile)
+static void EnumerateCustomShaderSections(IniSections &sections, wchar_t *iniFile)
 {
 	IniSections::iterator lower, upper, i;
 	wstring shader_id;
-	CustomShader *custom_shader;
-	wchar_t setting[MAX_PATH];
-	bool failed;
 
 	customShaders.clear();
 
 	lower = sections.lower_bound(wstring(L"CustomShader"));
 	upper = prefix_upper_bound(sections, wstring(L"CustomShader"));
 	for (i = lower; i != upper; i++) {
-		LogInfoW(L"[%s]\n", i->c_str());
-
 		// Convert section name to lower case so our keys will be
 		// consistent in the unordered_map:
 		shader_id = *i;
 		std::transform(shader_id.begin(), shader_id.end(), shader_id.begin(), ::towlower);
 
 		// Construct a custom shader in the global list:
-		custom_shader = &customShaders[shader_id];
+		customShaders[shader_id];
+	}
+}
+static void ParseCustomShaderSections(wchar_t *iniFile)
+{
+	CustomShaders::iterator i;
+	const wstring *shader_id;
+	CustomShader *custom_shader;
+	wchar_t setting[MAX_PATH];
+	bool failed;
+
+	for (i = customShaders.begin(); i != customShaders.end(); i++) {
+		shader_id = &i->first;
+		custom_shader = &i->second;
+
+		// FIXME: This will be logged in lower case. It would be better
+		// to use the original case, but not a big deal:
+		LogInfoW(L"[%s]\n", shader_id->c_str());
 
 		failed = false;
 
-		if (GetPrivateProfileString(i->c_str(), L"vs", 0, setting, MAX_PATH, iniFile))
-			failed |= custom_shader->compile('v', setting, &shader_id);
-		if (GetPrivateProfileString(i->c_str(), L"hs", 0, setting, MAX_PATH, iniFile))
-			failed |= custom_shader->compile('h', setting, &shader_id);
-		if (GetPrivateProfileString(i->c_str(), L"ds", 0, setting, MAX_PATH, iniFile))
-			failed |= custom_shader->compile('d', setting, &shader_id);
-		if (GetPrivateProfileString(i->c_str(), L"gs", 0, setting, MAX_PATH, iniFile))
-			failed |= custom_shader->compile('g', setting, &shader_id);
-		if (GetPrivateProfileString(i->c_str(), L"ps", 0, setting, MAX_PATH, iniFile))
-			failed |= custom_shader->compile('p', setting, &shader_id);
-		if (GetPrivateProfileString(i->c_str(), L"cs", 0, setting, MAX_PATH, iniFile))
-			failed |= custom_shader->compile('c', setting, &shader_id);
+		if (GetPrivateProfileString(shader_id->c_str(), L"vs", 0, setting, MAX_PATH, iniFile))
+			failed |= custom_shader->compile('v', setting, shader_id);
+		if (GetPrivateProfileString(shader_id->c_str(), L"hs", 0, setting, MAX_PATH, iniFile))
+			failed |= custom_shader->compile('h', setting, shader_id);
+		if (GetPrivateProfileString(shader_id->c_str(), L"ds", 0, setting, MAX_PATH, iniFile))
+			failed |= custom_shader->compile('d', setting, shader_id);
+		if (GetPrivateProfileString(shader_id->c_str(), L"gs", 0, setting, MAX_PATH, iniFile))
+			failed |= custom_shader->compile('g', setting, shader_id);
+		if (GetPrivateProfileString(shader_id->c_str(), L"ps", 0, setting, MAX_PATH, iniFile))
+			failed |= custom_shader->compile('p', setting, shader_id);
+		if (GetPrivateProfileString(shader_id->c_str(), L"cs", 0, setting, MAX_PATH, iniFile))
+			failed |= custom_shader->compile('c', setting, shader_id);
 
 
-		ParseBlendState(custom_shader, i->c_str(), iniFile);
-		ParseRSState(custom_shader, i->c_str(), iniFile);
-		ParseTopology(custom_shader, i->c_str(), iniFile);
+		ParseBlendState(custom_shader, shader_id->c_str(), iniFile);
+		ParseRSState(custom_shader, shader_id->c_str(), iniFile);
+		ParseTopology(custom_shader, shader_id->c_str(), iniFile);
 
 		custom_shader->max_executions_per_frame =
-			GetIniInt(i->c_str(), L"max_executions_per_frame", 0, iniFile, NULL);
+			GetIniInt(shader_id->c_str(), L"max_executions_per_frame", 0, iniFile, NULL);
 
 		if (failed) {
 			// Don't want to allow a shader to be run if it had an
 			// error since we are likely to call Draw or Dispatch
-			customShaders.erase(shader_id);
+			customShaders.erase(*shader_id);
 			continue;
 		}
 
-		// FIXME: Parse these later as these sections can refer to
-		// other CustomShader sections that may not have been parsed
-		// yet:
-		ParseCommandList(i->c_str(), iniFile, &custom_shader->command_list, &custom_shader->post_command_list, CustomShaderIniKeys);
+		ParseCommandList(shader_id->c_str(), iniFile, &custom_shader->command_list, &custom_shader->post_command_list, CustomShaderIniKeys);
+	}
+}
+
+// "Explicit" means that this parses command lists sections that are
+// *explicitly* called [CommandList*], as opposed to other sections that are
+// implicitly command lists (such as ShaderOverride, Present, etc).
+static void EnumerateExplicitCommandListSections(IniSections &sections, wchar_t *iniFile)
+{
+	IniSections::iterator lower, upper, i;
+	wstring section_id;
+
+	explicitCommandListSections.clear();
+
+	lower = sections.lower_bound(wstring(L"CommandList"));
+	upper = prefix_upper_bound(sections, wstring(L"CommandList"));
+	for (i = lower; i != upper; i++) {
+		// Convert section name to lower case so our keys will be
+		// consistent in the unordered_map:
+		section_id = *i;
+		std::transform(section_id.begin(), section_id.end(), section_id.begin(), ::towlower);
+
+		// Construct an explicit command list section in the global list:
+		explicitCommandListSections[section_id];
+	}
+}
+
+static void ParseExplicitCommandListSections(wchar_t *iniFile)
+{
+	ExplicitCommandListSections::iterator i;
+	ExplicitCommandListSection *command_list_section;
+	const wstring *section_id;
+
+	for (i = explicitCommandListSections.begin(); i != explicitCommandListSections.end(); i++) {
+		section_id = &i->first;
+		command_list_section = &i->second;
+
+		// FIXME: This will be logged in lower case. It would be better
+		// to use the original case, but not a big deal:
+		LogInfoW(L"[%s]\n", section_id->c_str());
+		ParseCommandList(section_id->c_str(), iniFile, &command_list_section->command_list, &command_list_section->post_command_list, NULL);
 	}
 }
 
@@ -1287,6 +1435,8 @@ void LoadConfigFile()
 			__debugbreak();
 	}
 
+	G->dump_all_profiles = GetIniBool(L"Logging", L"dump_all_profiles", false, iniFile, NULL);
+
 	// [System]
 	LogInfo("[System]\n");
 	GetPrivateProfileString(L"System", L"proxy_d3d11", 0, G->CHAIN_DLL_PATH, MAX_PATH, iniFile);
@@ -1298,17 +1448,10 @@ void LoadConfigFile()
 		G->enable_hooks = parse_enum_option_string<wchar_t *, EnableHooks>
 			(EnableHooksNames, setting, NULL);
 	}
-	if (GetPrivateProfileString(L"System", L"allow_dxgi1_2", 0, setting, MAX_PATH, iniFile))
-	{
-		LogInfoW(L"  allow_dxgi1_2=%s\n", setting);
-		G->enable_dxgi1_2 = true;
-	}
-	if (GetPrivateProfileString(L"System", L"allow_check_interface", 0, setting, MAX_PATH, iniFile))
-	{
-		LogInfoW(L"  allow_check_interface=%s\n", setting);
-		G->enable_check_interface = true;
-	}
+	G->enable_dxgi1_2 = GetIniInt(L"System", L"allow_dxgi1_2", 0, iniFile, NULL);
+	G->enable_check_interface = GetIniBool(L"System", L"allow_check_interface", false, iniFile, NULL);
 	G->enable_create_device = GetIniInt(L"System", L"allow_create_device", 0, iniFile, NULL);
+	G->enable_platform_update = GetIniBool(L"System", L"allow_platform_update", false, iniFile, NULL);
 
 	// [Device] (DXGI parameters)
 	LogInfo("[Device]\n");
@@ -1327,7 +1470,7 @@ void LoadConfigFile()
 
 	G->SCREEN_FULLSCREEN = GetIniInt(L"Device", L"full_screen", -1, iniFile, NULL);
 	RegisterIniKeyBinding(L"Device", L"toggle_full_screen", iniFile, ToggleFullScreen, NULL, 0, NULL);
-	G->gForceStereo = GetIniBool(L"Device", L"force_stereo", false, iniFile, NULL);
+	G->gForceStereo = GetIniInt(L"Device", L"force_stereo", 0, iniFile, NULL);
 	G->SCREEN_ALLOW_COMMANDS = GetIniBool(L"Device", L"allow_windowcommands", false, iniFile, NULL);
 
 	if (GetPrivateProfileString(L"Device", L"get_resolution_from", 0, setting, MAX_PATH, iniFile)) {
@@ -1539,7 +1682,22 @@ void LoadConfigFile()
 	RegisterPresetKeyBindings(sections, iniFile);
 
 	ParseResourceSections(sections, iniFile);
-	ParseCustomShaderSections(sections, iniFile);
+
+	// Splitting the enumeration of these sections out from parsing them as
+	// they can be referenced from other command list sections (via the run
+	// command), including sections of the same type. Most of the other
+	// sections don't need this so long as we parse them in an appropriate
+	// order so that sections that can be referred to are parsed before
+	// sections that can refer to them (e.g. Resource sections are parsed
+	// before all command list sections for this reason), but these are
+	// special since they can both refer to other sections and be referred
+	// to by other sections, and we don't want the parse order to determine
+	// if the reference will work or not.
+	EnumerateCustomShaderSections(sections, iniFile);
+	EnumerateExplicitCommandListSections(sections, iniFile);
+
+	ParseCustomShaderSections(iniFile);
+	ParseExplicitCommandListSections(iniFile);
 
 	ParseShaderOverrideSections(sections, iniFile);
 	ParseTextureOverrideSections(sections, iniFile);
@@ -1595,6 +1753,56 @@ void LoadConfigFile()
 			}
 		}
 	}
+
+	LogInfo("[Profile]\n");
+	ParseDriverProfile(iniFile);
+
+	LogInfo("\n");
+}
+
+// This variant is called by the profile manager helper with the path to the
+// game's executable passed in. It doesn't need to parse most of the config,
+// only the [Profile] section and some of the logging. It uses a separate log
+// file from the main DLL.
+void LoadProfileManagerConfig(const wchar_t *exe_path)
+{
+	wchar_t iniFile[MAX_PATH], logFilename[MAX_PATH];
+
+	G->gInitialized = true;
+
+	if (wcscpy_s(iniFile, MAX_PATH, exe_path))
+		DoubleBeepExit();
+	wcsrchr(iniFile, L'\\')[1] = 0;
+	wcscpy(logFilename, iniFile);
+	wcscat(iniFile, L"d3dx.ini");
+	wcscat(logFilename, L"d3d11_profile_log.txt");
+
+	// [Logging]
+	// Not using the helper function for this one since logging isn't enabled yet
+	if (GetPrivateProfileInt(L"Logging", L"calls", 1, iniFile))
+	{
+		if (!LogFile)
+			LogFile = _wfsopen(logFilename, L"w", _SH_DENYNO);
+		LogInfo("\n3DMigoto profile helper starting init - v %s - %s\n\n", VER_FILE_VERSION_STR, LogTime().c_str());
+		LogInfo("----------- d3dx.ini settings -----------\n");
+	}
+	LogInfo("[Logging]\n");
+	LogInfo("  calls=1\n");
+
+	gLogDebug = GetIniBool(L"Logging", L"debug", false, iniFile, NULL);
+
+	// Unbuffered logging to remove need for fflush calls, and r/w access to make it easy
+	// to open active files.
+	if (LogFile && GetIniBool(L"Logging", L"unbuffered", false, iniFile, NULL))
+	{
+		int unbuffered = setvbuf(LogFile, NULL, _IONBF, 0);
+		LogInfo("    unbuffered return: %d\n", unbuffered);
+	}
+
+	LogInfo("[Profile]\n");
+	ParseDriverProfile(iniFile);
+
+	LogInfo("\n");
 }
 
 

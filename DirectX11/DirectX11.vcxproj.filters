@@ -20,6 +20,7 @@
     <ClCompile Include="ResourceHash.cpp" />
     <ClCompile Include="HookedContext.cpp" />
     <ClCompile Include="HookedDevice.cpp" />
+    <ClCompile Include="nvprofile.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="d3d11Wrapper.def" />
@@ -48,5 +49,6 @@
     <ClInclude Include="HookedContext.h" />
     <ClInclude Include="HookedDevice.h" />
     <ClInclude Include="..\shader.h" />
+    <ClInclude Include="nvprofile.h" />
   </ItemGroup>
 </Project>

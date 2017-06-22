@@ -17,12 +17,19 @@
 #include "HackerContext.h"
 #include "IniHandler.h"
 #include "HackerDXGI.h"
+#include "nvprofile.h"
 
 // The Log file and the Globals are both used globally, and these are the actual
 // definitions of the variables.  All other uses will be via the extern in the 
 // globals.h and log.h files.
 
-Globals *G;
+// Globals used to be allocated on the heap, which is pointless given that it
+// is global, and fragile given that we now have a second entry point for the
+// profile helper that does not use the same init paths as the regular dll.
+// Statically allocate it as StaticG and point the old G pointer to it to avoid
+// needing to change every reference.
+Globals StaticG;
+Globals *G = &StaticG;
 
 FILE *LogFile = 0;		// off by default.
 bool gLogDebug = false;
@@ -61,6 +68,9 @@ bool InitializeDLL()
 		return false;
 	}
 
+	log_nv_driver_version();
+	log_check_and_update_nv_profiles();
+
 	// This sequence is to make the force_no_nvapi work.  When the game pCars
 	// starts it calls NvAPI_Initialize that we want to return an error for.
 	// But, the NV stereo driver ALSO calls NvAPI_Initialize, and we need to let
@@ -85,7 +95,21 @@ bool InitializeDLL()
 	//	LogInfo("  *** stereo is disabled: %s  ***\n", errorMessage);
 	//	return false;
 	//}
-		
+
+	// If we are going to use 3D Vision Direct Mode, we need to set the driver 
+	// into that mode early, before any possible CreateDevice occurs.
+	if (G->gForceStereo == 2)
+	{
+		status = NvAPI_Stereo_SetDriverMode(NVAPI_STEREO_DRIVER_MODE_DIRECT);
+		if (status != NVAPI_OK)
+		{
+			NvAPI_GetErrorMessage(status, errorMessage);
+			LogInfo("*** NvAPI_Stereo_SetDriverMode to Direct, failed: %s\n", errorMessage);
+			return false;
+		}
+		LogInfo("  NvAPI_Stereo_SetDriverMode successfully set to Direct Mode\n");
+	}
+
 	LogInfo("\n***  D3D11 DLL successfully initialized.  ***\n\n");
 	return true;
 }
@@ -374,7 +398,6 @@ void InitD311()
 
 	if (hD3D11) return;
 
-	G = new Globals();
 	InitializeCriticalSection(&G->mCriticalSection);
 
 	InitializeDLL();
@@ -690,7 +713,7 @@ HRESULT WINAPI D3D11CreateDevice(
 					D3D_DRIVER_TYPE     DriverType,
 					HMODULE             Software,
 					UINT                Flags,
-	_In_reads_opt_(FeatureLevels) /*const*/ D3D_FEATURE_LEVEL   *pFeatureLevels,
+	_In_reads_opt_(FeatureLevels) const D3D_FEATURE_LEVEL   *pFeatureLevels,
 					UINT                FeatureLevels,
 					UINT                SDKVersion,
 	_Out_opt_       ID3D11Device        **ppDevice,
@@ -707,7 +730,7 @@ HRESULT WINAPI D3D11CreateDevice(
 	LogInfo("    pFeatureLevel = %#x \n", pFeatureLevel ? *pFeatureLevel : 0);
 	LogInfo("    ppImmediateContext = %p \n", ppImmediateContext);
 
-	if (ForceDX11(pFeatureLevels))
+	if (ForceDX11(const_cast<D3D_FEATURE_LEVEL*>(pFeatureLevels)))
 		return E_INVALIDARG;
 
 #if _DEBUG_LAYER
@@ -734,11 +757,26 @@ HRESULT WINAPI D3D11CreateDevice(
 	ShowDebugInfo(origDevice);
 #endif
 
+	// When platform update is desired, we want to create the HackerDevice1 and
+	// HackerContext1 objects instead.  We'll store these and return them as
+	// non1 objects so other code can just use the objects.
+	ID3D11Device1 *origDevice1 = nullptr;
+	ID3D11DeviceContext1 *origContext1 = nullptr;
+	if (G->enable_platform_update)
+	{
+		origDevice->QueryInterface(IID_PPV_ARGS(&origDevice1));
+		origContext->QueryInterface(IID_PPV_ARGS(&origContext1));
+	}
+
 	// Create a wrapped version of the original device to return to the game.
 	HackerDevice *deviceWrap = nullptr;
-	if (ppDevice != nullptr)
+	if (origDevice != nullptr)
 	{
-		deviceWrap = new HackerDevice(origDevice, origContext);
+		if (G->enable_platform_update)
+			deviceWrap = new HackerDevice1(origDevice1, origContext1);
+		else
+			deviceWrap = new HackerDevice(origDevice, origContext);
+
 		if (G->enable_hooks & EnableHooks::DEVICE)
 			deviceWrap->HookDevice();
 		else
@@ -748,9 +786,13 @@ HRESULT WINAPI D3D11CreateDevice(
 
 	// Create a wrapped version of the original context to return to the game.
 	HackerContext *contextWrap = nullptr;
-	if (ppImmediateContext != nullptr)
+	if (origContext != nullptr)
 	{
-		contextWrap = new HackerContext(origDevice, origContext);
+		if (G->enable_platform_update)
+			contextWrap = new HackerContext1(origDevice1, origContext1);
+		else
+			contextWrap = new HackerContext(origDevice, origContext);
+
 		if (G->enable_hooks & EnableHooks::IMMEDIATE_CONTEXT)
 			contextWrap->HookContext();
 		else
@@ -789,7 +831,7 @@ HRESULT WINAPI D3D11CreateDeviceAndSwapChain(
 						D3D_DRIVER_TYPE      DriverType,
 						HMODULE              Software,
 						UINT                 Flags,
-	_In_opt_ /*const*/	D3D_FEATURE_LEVEL    *pFeatureLevels,
+	_In_opt_ const		D3D_FEATURE_LEVEL    *pFeatureLevels,
 						UINT                 FeatureLevels,
 						UINT                 SDKVersion,
 	_In_opt_			DXGI_SWAP_CHAIN_DESC *pSwapChainDesc,
@@ -810,7 +852,7 @@ HRESULT WINAPI D3D11CreateDeviceAndSwapChain(
 	LogInfo("    pFeatureLevel = %#x \n", pFeatureLevel ? *pFeatureLevel: 0);
 	LogInfo("    ppImmediateContext = %p \n", ppImmediateContext);
 
-	if (ForceDX11(pFeatureLevels))
+	if (ForceDX11(const_cast<D3D_FEATURE_LEVEL*>(pFeatureLevels)))
 		return E_INVALIDARG;
 
 	ForceDisplayParams(pSwapChainDesc);
@@ -847,10 +889,24 @@ HRESULT WINAPI D3D11CreateDeviceAndSwapChain(
 	ShowDebugInfo(origDevice);
 #endif
 
+	// When platform update is desired, we want to create the HackerDevice1 and
+	// HackerContext1 objects instead. 
+	ID3D11Device1 *origDevice1 = nullptr;
+	ID3D11DeviceContext1 *origContext1 = nullptr;
+	if (G->enable_platform_update)
+	{
+		origDevice->QueryInterface(IID_PPV_ARGS(&origDevice1));
+		origContext->QueryInterface(IID_PPV_ARGS(&origContext1));
+	}
+
 	HackerDevice *deviceWrap = nullptr;
 	if (ppDevice != nullptr)
 	{
-		deviceWrap = new HackerDevice(origDevice, origContext);
+		if (G->enable_platform_update)
+			deviceWrap = new HackerDevice1(origDevice1, origContext1);
+		else
+			deviceWrap = new HackerDevice(origDevice, origContext);
+
 		if (G->enable_hooks & EnableHooks::DEVICE)
 			deviceWrap->HookDevice();
 		else
@@ -861,7 +917,11 @@ HRESULT WINAPI D3D11CreateDeviceAndSwapChain(
 	HackerContext *contextWrap = nullptr;
 	if (ppImmediateContext != nullptr)
 	{
-		contextWrap = new HackerContext(origDevice, origContext);
+		if (G->enable_platform_update)
+			contextWrap = new HackerContext1(origDevice1, origContext1);
+		else
+			contextWrap = new HackerContext(origDevice, origContext);
+
 		if (G->enable_hooks & EnableHooks::IMMEDIATE_CONTEXT)
 			contextWrap->HookContext();
 		else

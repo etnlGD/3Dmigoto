@@ -4,6 +4,12 @@
 // Hierarchy:
 //  HackerContext <- ID3D11DeviceContext <- ID3D11DeviceChild <- IUnknown
 
+// Object				OS				D3D11 version	Feature level
+// ID3D11DeviceContext	Win7			11.0			11.0
+// ID3D11DeviceContext1	Platform update	11.1			11.1
+// ID3D11DeviceContext2	Win8.1			11.2
+// ID3D11DeviceContext3					11.3
+
 #include "HackerContext.h"
 #include "HookedContext.h"
 
@@ -336,28 +342,32 @@ void HackerContext::BeforeDraw(DrawContext &data)
 		UINT selectedRenderTargetPos;
 		if (G->ENABLE_CRITICAL_SECTION) EnterCriticalSection(&G->mCriticalSection);
 		{
-			// Stats
-			if (mCurrentVertexShader && mCurrentPixelShader)
-			{
-				G->mVertexShaderInfo[mCurrentVertexShader].PartnerShader.insert(mCurrentPixelShader);
-				G->mPixelShaderInfo[mCurrentPixelShader].PartnerShader.insert(mCurrentVertexShader);
-			}
-			if (mCurrentPixelShader) {
-				for (selectedRenderTargetPos = 0; selectedRenderTargetPos < mCurrentRenderTargets.size(); ++selectedRenderTargetPos) {
-					std::vector<std::set<ID3D11Resource *>> &targets = G->mPixelShaderInfo[mCurrentPixelShader].RenderTargets;
-
-					if (selectedRenderTargetPos >= targets.size())
-						targets.push_back(std::set<ID3D11Resource *>());
-
-					targets[selectedRenderTargetPos].insert(mCurrentRenderTargets[selectedRenderTargetPos]);
+			// In some cases stat collection can have a significant
+			// performance impact or may result in a runaway
+			// memory leak, so only do it if dump_usage is enabled:
+			if (G->DumpUsage) {
+				if (mCurrentVertexShader && mCurrentPixelShader)
+				{
+					G->mVertexShaderInfo[mCurrentVertexShader].PartnerShader.insert(mCurrentPixelShader);
+					G->mPixelShaderInfo[mCurrentPixelShader].PartnerShader.insert(mCurrentVertexShader);
 				}
-				if (mCurrentDepthTarget)
-					G->mPixelShaderInfo[mCurrentPixelShader].DepthTargets.insert(mCurrentDepthTarget);
-			}
+				if (mCurrentPixelShader) {
+					for (selectedRenderTargetPos = 0; selectedRenderTargetPos < mCurrentRenderTargets.size(); ++selectedRenderTargetPos) {
+						std::vector<std::set<ID3D11Resource *>> &targets = G->mPixelShaderInfo[mCurrentPixelShader].RenderTargets;
 
-			// Maybe make this optional if it turns out to have a
-			// significant performance impact:
-			RecordShaderResourceUsage();
+						if (selectedRenderTargetPos >= targets.size())
+							targets.push_back(std::set<ID3D11Resource *>());
+
+						targets[selectedRenderTargetPos].insert(mCurrentRenderTargets[selectedRenderTargetPos]);
+					}
+					if (mCurrentDepthTarget)
+						G->mPixelShaderInfo[mCurrentPixelShader].DepthTargets.insert(mCurrentDepthTarget);
+				}
+
+				// Maybe make this optional if it turns out to have a
+				// significant performance impact:
+				RecordShaderResourceUsage();
+			}
 
 			// Selection
 			for (selectedRenderTargetPos = 0; selectedRenderTargetPos < mCurrentRenderTargets.size(); ++selectedRenderTargetPos)
@@ -618,12 +628,12 @@ HRESULT STDMETHODCALLTYPE HackerContext::QueryInterface(
 	/* [in] */ REFIID riid,
 	/* [iid_is][out] */ _COM_Outptr_ void __RPC_FAR *__RPC_FAR *ppvObject)
 {
-	LogDebug("HackerContext::QueryInterface(%s@%p) called with IID: %s \n", type_name(this), this, NameFromIID(riid).c_str());
+	LogDebug("HackerContext::QueryInterface(%s@%p) called with IID: %s\n", type_name(this), this, NameFromIID(riid).c_str());
 		
 	HRESULT hr = mOrigContext->QueryInterface(riid, ppvObject);
 	if (FAILED(hr))
 	{
-		LogInfo("  failed result = %x for %p \n", hr, ppvObject);
+		LogInfo("  failed result = %x for %p\n", hr, ppvObject);
 		return hr;
 	}
 
@@ -632,10 +642,58 @@ HRESULT STDMETHODCALLTYPE HackerContext::QueryInterface(
 	if (riid == __uuidof(ID3D11DeviceContext))
 	{
 		*ppvObject = this;
-		LogDebug("  return HackerContext(%s@%p) wrapper of %p \n", type_name(this), this, mOrigContext);
+		LogDebug("  return HackerContext(%s@%p) wrapper of %p\n", type_name(this), this, mOrigContext);
+	}
+	else if (riid == __uuidof(ID3D11DeviceContext1))
+	{
+		if (!G->enable_platform_update) 
+		{
+			LogInfo("***  returns E_NOINTERFACE as error for ID3D11DeviceContext1 (try allow_platform_update=1 if the game refuses to run).\n");
+			*ppvObject = NULL;
+			return E_NOINTERFACE;
+		}
+
+		// If this happens to already be a HackerContext1, we don't want to rewrap it or make a new one.
+		if (dynamic_cast<HackerContext1*>(this) != NULL)
+		{
+			*ppvObject = this;
+			LogDebug("  return HackerContext1(%s@%p) wrapper of %p\n", type_name(this), this, ppvObject);
+		}
+
+		// For Batman: TellTale games, they call this to fetch the DeviceContext1.
+		// We need to return a hooked version as part of fleshing it out for games like this
+		// that require the evil-update to run.
+		// Not at all positive this is the right approach, the mix of type1 objects and
+		// Hacker objects is a bit obscure.
+
+		// If platform_update is allowed, we have to assume that this QueryInterface off
+		// the original context will work.
+		ID3D11Device1 *origDevice1;
+		HRESULT hr = mOrigContext->QueryInterface(IID_PPV_ARGS(&origDevice1));
+		if (FAILED(hr))
+		{
+			LogInfo("  failed QueryInterface for ID3D11Device1 = %x for %p\n", hr, origDevice1);
+			LogInfo("***  return error\n");
+			return hr;
+		}
+
+		// The original QueryInterface will have returned us the legit ID3D11DeviceContext1
+		ID3D11DeviceContext1 *origContext1 = static_cast<ID3D11DeviceContext1*>(*ppvObject);
+
+		HackerDevice1 *hackerDeviceWrap1 = new HackerDevice1(origDevice1, origContext1);
+		LogDebug("  created HackerDevice1(%s@%p) wrapper of %p\n", type_name(hackerDeviceWrap1), hackerDeviceWrap1, origDevice1);
+
+		HackerContext1 *hackerContextWrap1 = new HackerContext1(origDevice1, origContext1);
+		LogDebug("  created HackerContext1(%s@%p) wrapper of %p\n", type_name(hackerContextWrap1), hackerContextWrap1, origContext1);
+
+		hackerDeviceWrap1->SetHackerContext1(hackerContextWrap1);
+		hackerContextWrap1->SetHackerDevice1(hackerDeviceWrap1);
+
+		*ppvObject = hackerContextWrap1;
+		LogDebug("  created HackerContext1(%s@%p) wrapper of %p\n", type_name(hackerContextWrap1), hackerContextWrap1, origContext1);
 	}
 
-	LogDebug("  returns result = %x for %p \n", hr, ppvObject);
+	LogDebug("  returns result = %x for %p\n", hr, ppvObject);
 	return hr;
 }
 
@@ -655,7 +713,7 @@ STDMETHODIMP_(void) HackerContext::GetDevice(THIS_
 	/* [annotation] */
 	__out  ID3D11Device **ppDevice)
 {
-	LogDebug("HackerContext::GetDevice(%s@%p) returns %p \n", type_name(this), this, mHackerDevice);
+	LogDebug("HackerContext::GetDevice(%s@%p) returns %p\n", type_name(this), this, mHackerDevice);
 
 	// Fix ref counting bug that slowly eats away at the device until we
 	// crash. In FC4 this can happen after about 10 minutes, or when
@@ -678,7 +736,7 @@ STDMETHODIMP HackerContext::GetPrivateData(THIS_
 	/* [annotation] */
 	__out_bcount_opt(*pDataSize)  void *pData)
 {
-	LogInfo("HackerContext::GetPrivateData(%s@%p) called with IID: %s \n", type_name(this), this, NameFromIID(guid).c_str());
+	LogInfo("HackerContext::GetPrivateData(%s@%p) called with IID: %s\n", type_name(this), this, NameFromIID(guid).c_str());
 
 	HRESULT hr = mOrigContext->GetPrivateData(guid, pDataSize, pData);
 	LogInfo("  returns result = %x, DataSize = %d\n", hr, *pDataSize);
@@ -694,7 +752,7 @@ STDMETHODIMP HackerContext::SetPrivateData(THIS_
 	/* [annotation] */
 	__in_bcount_opt(DataSize)  const void *pData)
 {
-	LogInfo("HackerContext::SetPrivateData(%s@%p) called with IID: %s \n", type_name(this), this, NameFromIID(guid).c_str());
+	LogInfo("HackerContext::SetPrivateData(%s@%p) called with IID: %s\n", type_name(this), this, NameFromIID(guid).c_str());
 	LogInfo("  DataSize = %d\n", DataSize);
 
 	HRESULT hr = mOrigContext->SetPrivateData(guid, DataSize, pData);
@@ -709,7 +767,7 @@ STDMETHODIMP HackerContext::SetPrivateDataInterface(THIS_
 	/* [annotation] */
 	__in_opt  const IUnknown *pData)
 {
-	LogInfo("HackerContext::SetPrivateDataInterface(%s@%p) called with IID: %s \n", type_name(this), this, NameFromIID(guid).c_str());
+	LogInfo("HackerContext::SetPrivateDataInterface(%s@%p) called with IID: %s\n", type_name(this), this, NameFromIID(guid).c_str());
 
 	HRESULT hr = mOrigContext->SetPrivateDataInterface(guid, pData);
 	LogInfo("  returns result = %x\n", hr);
@@ -841,7 +899,7 @@ STDMETHODIMP HackerContext::Map(THIS_
 	/* [annotation] */
 	__out D3D11_MAPPED_SUBRESOURCE *pMappedResource)
 {
-	FrameAnalysisLog("Map(pResource:0x%p, Subresource:%u, MapType:%u, MapFlags:%u, pMappedResource:0x%p)",
+	FrameAnalysisLog("Map(pResource:0x%p, Subresource:%u, MapType:%u, MapFlags:%u, pMappedResource:0x%p)\n",
 			pResource, Subresource, MapType, MapFlags, pMappedResource);
 	FrameAnalysisLogResourceHash(pResource);
 
@@ -863,13 +921,16 @@ STDMETHODIMP_(void) HackerContext::Unmap(THIS_
 	/* [annotation] */
 	__in  UINT Subresource)
 {
-	FrameAnalysisLog("Unmap(pResource:0x%p, Subresource:%u)",
+	FrameAnalysisLog("Unmap(pResource:0x%p, Subresource:%u)\n",
 			pResource, Subresource);
 	FrameAnalysisLogResourceHash(pResource);
 
 	MapUpdateResourceHash(pResource, Subresource);
 	FreeDeniedMapping(pResource, Subresource);
 	mOrigContext->Unmap(pResource, Subresource);
+
+	if (G->analyse_frame)
+		FrameAnalysisAfterUnmap(pResource);
 }
 
 STDMETHODIMP_(void) HackerContext::PSSetConstantBuffers(THIS_
@@ -996,7 +1057,7 @@ STDMETHODIMP_(void) HackerContext::Begin(THIS_
 	/* [annotation] */
 	__in  ID3D11Asynchronous *pAsync)
 {
-	FrameAnalysisLog("Begin(pAsync:0x%p)", pAsync);
+	FrameAnalysisLog("Begin(pAsync:0x%p)\n", pAsync);
 	FrameAnalysisLogAsyncQuery(pAsync);
 	
 	mOrigContext->Begin(pAsync);
@@ -1006,7 +1067,7 @@ STDMETHODIMP_(void) HackerContext::End(THIS_
 	/* [annotation] */
 	__in  ID3D11Asynchronous *pAsync)
 {
-	FrameAnalysisLog("End(pAsync:0x%p)", pAsync);
+	FrameAnalysisLog("End(pAsync:0x%p)\n", pAsync);
 	FrameAnalysisLogAsyncQuery(pAsync);
 
 	 mOrigContext->End(pAsync);
@@ -1024,7 +1085,7 @@ STDMETHODIMP HackerContext::GetData(THIS_
 {
 	HRESULT ret = mOrigContext->GetData(pAsync, pData, DataSize, GetDataFlags);
 
-	FrameAnalysisLog("GetData(pAsync:0x%p, pData:0x%p, DataSize:%u, GetDataFlags:%u) = %u",
+	FrameAnalysisLog("GetData(pAsync:0x%p, pData:0x%p, DataSize:%u, GetDataFlags:%u) = %u\n",
 			pAsync, pData, DataSize, GetDataFlags, ret);
 	FrameAnalysisLogAsyncQuery(pAsync);
 	if (SUCCEEDED(ret))
@@ -1039,7 +1100,7 @@ STDMETHODIMP_(void) HackerContext::SetPredication(THIS_
 	/* [annotation] */
 	__in  BOOL PredicateValue)
 {
-	FrameAnalysisLog("SetPredication(pPredicate:0x%p, PredicateValue:%s)",
+	FrameAnalysisLog("SetPredication(pPredicate:0x%p, PredicateValue:%s)\n",
 			pPredicate, PredicateValue ? "true" : "false");
 	FrameAnalysisLogAsyncQuery(pPredicate);
 
@@ -1213,6 +1274,22 @@ STDMETHODIMP_(void) HackerContext::RSSetViewports(THIS_
 	FrameAnalysisLog("RSSetViewports(NumViewports:%u, pViewports:0x%p)\n",
 			NumViewports, pViewports);
 
+	// In the 3D Vision Direct Mode, we need to double the width of any ViewPorts
+	// We specifically modify the input, so that the game is using full 2x width.
+	// Modifying every ViewPort rect seems wrong, so we are only doing those that
+	// match the screen resolution. 
+	if (G->gForceStereo == 2)
+	{
+		for (size_t i = 0; i < NumViewports; i++)
+		{
+			if (pViewports[i].Width == G->mResolutionInfo.width)
+			{
+				const_cast<D3D11_VIEWPORT *>(pViewports)[i].Width *= 2;
+				LogInfo("-> forced 2x width for Direct Mode: %.0f\n", pViewports[i].Width);
+			}
+		}
+	}
+
 	 mOrigContext->RSSetViewports(NumViewports, pViewports);
 }
 
@@ -1359,7 +1436,7 @@ STDMETHODIMP_(void) HackerContext::UpdateSubresource(THIS_
 	/* [annotation] */
 	__in  UINT SrcDepthPitch)
 {
-	FrameAnalysisLog("UpdateSubresource(pDstResource:0x%p, DstSubresource:%u, pDstBox:0x%p, pSrcData:0x%p, SrcRowPitch:%u, SrcDepthPitch:%u)",
+	FrameAnalysisLog("UpdateSubresource(pDstResource:0x%p, DstSubresource:%u, pDstBox:0x%p, pSrcData:0x%p, SrcRowPitch:%u, SrcDepthPitch:%u)\n",
 			pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch);
 	FrameAnalysisLogResourceHash(pDstResource);
 
@@ -1402,7 +1479,7 @@ STDMETHODIMP_(void) HackerContext::ClearUnorderedAccessViewUint(THIS_
 	/* [annotation] */
 	__in  const UINT Values[4])
 {
-	FrameAnalysisLog("ClearUnorderedAccessViewUint(pUnorderedAccessView:0x%p, Values:0x%p)",
+	FrameAnalysisLog("ClearUnorderedAccessViewUint(pUnorderedAccessView:0x%p, Values:0x%p \n)",
 			pUnorderedAccessView, Values);
 	FrameAnalysisLogView(-1, NULL, pUnorderedAccessView);
 
@@ -1415,7 +1492,7 @@ STDMETHODIMP_(void) HackerContext::ClearUnorderedAccessViewFloat(THIS_
 	/* [annotation] */
 	__in  const FLOAT Values[4])
 {
-	FrameAnalysisLog("ClearUnorderedAccessViewFloat(pUnorderedAccessView:0x%p, Values:0x%p)",
+	FrameAnalysisLog("ClearUnorderedAccessViewFloat(pUnorderedAccessView:0x%p, Values:0x%p \n)",
 			pUnorderedAccessView, Values);
 	FrameAnalysisLogView(-1, NULL, pUnorderedAccessView);
 
@@ -1432,7 +1509,7 @@ STDMETHODIMP_(void) HackerContext::ClearDepthStencilView(THIS_
 	/* [annotation] */
 	__in  UINT8 Stencil)
 {
-	FrameAnalysisLog("ClearDepthStencilView(pDepthStencilView:0x%p, ClearFlags:%u, Depth:%f, Stencil:%u)",
+	FrameAnalysisLog("ClearDepthStencilView(pDepthStencilView:0x%p, ClearFlags:%u, Depth:%f, Stencil:%u \n)",
 			pDepthStencilView, ClearFlags, Depth, Stencil);
 	FrameAnalysisLogView(-1, NULL, pDepthStencilView);
 
@@ -1443,7 +1520,7 @@ STDMETHODIMP_(void) HackerContext::GenerateMips(THIS_
 	/* [annotation] */
 	__in  ID3D11ShaderResourceView *pShaderResourceView)
 {
-	FrameAnalysisLog("GenerateMips(pShaderResourceView:0x%p)",
+	FrameAnalysisLog("GenerateMips(pShaderResourceView:0x%p \n)",
 			pShaderResourceView);
 	FrameAnalysisLogView(-1, NULL, pShaderResourceView);
 
@@ -1455,7 +1532,7 @@ STDMETHODIMP_(void) HackerContext::SetResourceMinLOD(THIS_
 	__in  ID3D11Resource *pResource,
 	FLOAT MinLOD)
 {
-	FrameAnalysisLog("SetResourceMinLOD(pResource:0x%p)",
+	FrameAnalysisLog("SetResourceMinLOD(pResource:0x%p \n)",
 			pResource);
 	FrameAnalysisLogResourceHash(pResource);
 
@@ -1468,7 +1545,7 @@ STDMETHODIMP_(FLOAT) HackerContext::GetResourceMinLOD(THIS_
 {
 	FLOAT ret = mOrigContext->GetResourceMinLOD(pResource);
 
-	FrameAnalysisLog("GetResourceMinLOD(pResource:0x%p) = %f",
+	FrameAnalysisLog("GetResourceMinLOD(pResource:0x%p) = %f\n",
 			pResource, ret);
 	FrameAnalysisLogResourceHash(pResource);
 	return ret;
@@ -2032,7 +2109,7 @@ STDMETHODIMP_(void) HackerContext::GetPredication(THIS_
 {
 	 mOrigContext->GetPredication(ppPredicate, pPredicateValue);
 
-	FrameAnalysisLog("GetPredication(ppPredicate:0x%p, pPredicateValue:0x%p)",
+	FrameAnalysisLog("GetPredication(ppPredicate:0x%p, pPredicateValue:0x%p)\n",
 			ppPredicate, pPredicateValue);
 	FrameAnalysisLogAsyncQuery(ppPredicate ? *ppPredicate : NULL);
 }
@@ -2525,7 +2602,7 @@ STDMETHODIMP_(void) HackerContext::DrawIndexed(THIS_
 	DrawContext c = DrawContext(0, IndexCount, 0, BaseVertexLocation, StartIndexLocation, 0);
 	BeforeDraw(c);
 
-	FrameAnalysisLog("DrawIndexed(IndexCount:%u, StartIndexLocation:%u, BaseVertexLocation:%u)\n",
+	FrameAnalysisLog("DrawIndexed(IndexCount:%u, StartIndexLocation:%u, BaseVertexLocation:%u) \n",
 			IndexCount, StartIndexLocation, BaseVertexLocation);
 
 	if (!c.skip)
@@ -2558,7 +2635,7 @@ STDMETHODIMP_(void) HackerContext::IASetIndexBuffer(THIS_
 	/* [annotation] */
 	__in  UINT Offset)
 {
-	FrameAnalysisLog("IASetIndexBuffer(pIndexBuffer:0x%p, Format:%u, Offset:%u)",
+	FrameAnalysisLog("IASetIndexBuffer(pIndexBuffer:0x%p, Format:%u, Offset:%u)\n",
 			pIndexBuffer, Format, Offset);
 	FrameAnalysisLogResourceHash(pIndexBuffer);
 
@@ -2569,7 +2646,7 @@ STDMETHODIMP_(void) HackerContext::IASetIndexBuffer(THIS_
 		DataBufferMap::iterator i = G->mDataBuffers.find(pIndexBuffer);
 		if (i != G->mDataBuffers.end()) {
 			mCurrentIndexBuffer = i->second;
-			LogDebug("  index buffer found: handle = %p, hash = %08lx \n", pIndexBuffer, mCurrentIndexBuffer);
+			LogDebug("  index buffer found: handle = %p, hash = %08lx\n", pIndexBuffer, mCurrentIndexBuffer);
 
 			if (G->ENABLE_CRITICAL_SECTION) EnterCriticalSection(&G->mCriticalSection);
 				G->mVisitedIndexBuffers.insert(mCurrentIndexBuffer);
@@ -2668,12 +2745,14 @@ STDMETHODIMP_(void) HackerContext::OMSetRenderTargets(THIS_
 			for (UINT i = 0; i < NumViews; ++i) {
 				if (!ppRenderTargetViews[i])
 					continue;
-				RecordRenderTargetInfo(ppRenderTargetViews[i], i);
+				if (G->DumpUsage)
+					RecordRenderTargetInfo(ppRenderTargetViews[i], i);
 				FrameAnalysisClearRT(ppRenderTargetViews[i]);
 			}
 		}
 
-		RecordDepthStencil(pDepthStencilView);
+		if (G->DumpUsage)
+			RecordDepthStencil(pDepthStencilView);
 	}
 
 	mOrigContext->OMSetRenderTargets(NumViews, ppRenderTargetViews, pDepthStencilView);
@@ -2695,7 +2774,7 @@ STDMETHODIMP_(void) HackerContext::OMSetRenderTargetsAndUnorderedAccessViews(THI
 	/* [annotation] */
 	__in_ecount_opt(NumUAVs)  const UINT *pUAVInitialCounts)
 {
-	FrameAnalysisLog("OMSetRenderTargetsAndUnorderedAccessViews(NumRTVs:%i, ppRenderTargetViews:0x%p, pDepthStencilView:0x%p, UAVStartSlot:%i, NumUAVs:%u, ppUnorderedAccessViews:0x%p, pUAVInitialCounts:0x%p)\n",
+	FrameAnalysisLog("OMSetRenderTargetsAndUnorderedAccessViews(NumRTVs:%i, ppRenderTargetViews:0x%p, pDepthStencilView:0x%p, UAVStartSlot:%i, NumUAVs:%u, ppUnorderedAccessViews:0x%p, pUAVInitialCounts:0x%p) \n",
 			NumRTVs, ppRenderTargetViews, pDepthStencilView,
 			UAVStartSlot, NumUAVs, ppUnorderedAccessViews,
 			pUAVInitialCounts);
@@ -2714,12 +2793,14 @@ STDMETHODIMP_(void) HackerContext::OMSetRenderTargetsAndUnorderedAccessViews(THI
 				for (UINT i = 0; i < NumRTVs; ++i) {
 					if (!ppRenderTargetViews[i])
 						continue;
-					RecordRenderTargetInfo(ppRenderTargetViews[i], i);
+					if (G->DumpUsage)
+						RecordRenderTargetInfo(ppRenderTargetViews[i], i);
 					FrameAnalysisClearRT(ppRenderTargetViews[i]);
 				}
 			}
 
-			RecordDepthStencil(pDepthStencilView);
+			if (G->DumpUsage)
+				RecordDepthStencil(pDepthStencilView);
 		}
 
 		if (ppUnorderedAccessViews && (NumUAVs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS)) {
@@ -2788,7 +2869,7 @@ STDMETHODIMP_(void) HackerContext::ClearRenderTargetView(THIS_
 	/* [annotation] */
 	__in  const FLOAT ColorRGBA[4])
 {
-	FrameAnalysisLog("ClearRenderTargetView(pRenderTargetView:0x%p, ColorRGBA:0x%p)",
+	FrameAnalysisLog("ClearRenderTargetView(pRenderTargetView:0x%p, ColorRGBA:0x%p)\n",
 			pRenderTargetView, ColorRGBA);
 	FrameAnalysisLogView(-1, NULL, pRenderTargetView);
 
@@ -2798,14 +2879,24 @@ STDMETHODIMP_(void) HackerContext::ClearRenderTargetView(THIS_
 
 // -----------------------------------------------------------------------------
 // HackerContext1
-//	Not positive we need this now, but makes it possible to wrap Device1 for 
-//	systems with platform update installed.
+//	Requires Win7 Platform Update
+
+// Hierarchy:
+//  HackerContext1 <- HackerContext <- ID3D11DeviceContext <- ID3D11DeviceChild <- IUnknown
 
 HackerContext1::HackerContext1(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pContext)
 	: HackerContext(pDevice1, pContext)
 {
 	mOrigDevice1 = pDevice1;
 	mOrigContext1 = pContext;
+}
+
+void HackerContext1::SetHackerDevice1(HackerDevice1 *pDevice)
+{
+	mHackerDevice1 = pDevice;
+
+	// Pass this along to the superclass, in case games improperly use the non1 versions.
+	SetHackerDevice(pDevice);
 }
 
 
@@ -2853,7 +2944,7 @@ void STDMETHODCALLTYPE HackerContext1::UpdateSubresource1(
 	/* [annotation] */
 	_In_  UINT CopyFlags)
 {
-	FrameAnalysisLog("UpdateSubresource1(pDstResource:0x%p, DstSubresource:%u, pDstBox:0x%p, pSrcData:0x%p, SrcRowPitch:%u, SrcDepthPitch:%u, CopyFlags:%u)",
+	FrameAnalysisLog("UpdateSubresource1(pDstResource:0x%p, DstSubresource:%u, pDstBox:0x%p, pSrcData:0x%p, SrcRowPitch:%u, SrcDepthPitch:%u, CopyFlags:%u)\n",
 			pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch, CopyFlags);
 	FrameAnalysisLogResourceHash(pDstResource);
 
@@ -2867,7 +2958,7 @@ void STDMETHODCALLTYPE HackerContext1::DiscardResource(
 	/* [annotation] */
 	_In_  ID3D11Resource *pResource)
 {
-	FrameAnalysisLog("DiscardResource(pResource:0x%p)",
+	FrameAnalysisLog("DiscardResource(pResource:0x%p)\n",
 			pResource);
 	FrameAnalysisLogResourceHash(pResource);
 
@@ -2878,7 +2969,7 @@ void STDMETHODCALLTYPE HackerContext1::DiscardView(
 	/* [annotation] */
 	_In_  ID3D11View *pResourceView)
 {
-	FrameAnalysisLog("DiscardView(pResourceView:0x%p)",
+	FrameAnalysisLog("DiscardView(pResourceView:0x%p)\n",
 			pResourceView);
 	FrameAnalysisLogView(-1, NULL, pResourceView);
 
@@ -3138,7 +3229,7 @@ void STDMETHODCALLTYPE HackerContext1::SwapDeviceContextState(
 	/* [annotation] */
 	_Out_opt_  ID3DDeviceContextState **ppPreviousState)
 {
-	FrameAnalysisLog("SwapDeviceContextState(pState:0x%p, ppPreviousState:0x%p)",
+	FrameAnalysisLog("SwapDeviceContextState(pState:0x%p, ppPreviousState:0x%p)\n",
 			pState, ppPreviousState);
 
 	mOrigContext1->SwapDeviceContextState(pState, ppPreviousState);
@@ -3154,7 +3245,7 @@ void STDMETHODCALLTYPE HackerContext1::ClearView(
 	_In_reads_opt_(NumRects)  const D3D11_RECT *pRect,
 	UINT NumRects)
 {
-	FrameAnalysisLog("ClearView(pView:0x%p, Color:0x%p, pRect:0x%p)",
+	FrameAnalysisLog("ClearView(pView:0x%p, Color:0x%p, pRect:0x%p)\n",
 			pView, Color, pRect);
 	FrameAnalysisLogView(-1, NULL, pView);
 
@@ -3169,7 +3260,7 @@ void STDMETHODCALLTYPE HackerContext1::DiscardView1(
 	_In_reads_opt_(NumRects)  const D3D11_RECT *pRects,
 	UINT NumRects)
 {
-	FrameAnalysisLog("DiscardView1(pResourceView:0x%p, pRects:0x%p)",
+	FrameAnalysisLog("DiscardView1(pResourceView:0x%p, pRects:0x%p)\n",
 			pResourceView, pRects);
 	FrameAnalysisLogView(-1, NULL, pResourceView);
 
